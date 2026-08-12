@@ -1,7 +1,10 @@
 name: Build iCamping Map & Sync IDs
 
 on:
+  # 1. 支援手動在 GitHub 網頁 Actions 頁面點擊 "Run workflow" 按鈕執行
   workflow_dispatch:
+
+  # 2. 自動定期執行 (Cron Job)：每週一凌晨 00:00 (UTC) 自動運行一次
   schedule:
     - cron: '0 0 * * 1'
 
@@ -10,18 +13,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 步驟 1：檢出專案程式碼
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # 步驟 2：設定 Node.js 執行環境
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          # 移除 cache: 'npm'
 
-      - name: Install Dependencies
-        run: npm install # 將 npm ci 改為 npm install
+      # 步驟 3：直接安裝 build_icamping_map.js 所需的最少必要套件（避免 package.json 找不到的錯誤）
+      - name: Install Required Dependencies
+        run: npm install @supabase/supabase-js dotenv
 
+      # 步驟 4：執行預建與同步腳本（金鑰由 GitHub Secrets 安全注入）
       - name: Run build_icamping_map.js
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
