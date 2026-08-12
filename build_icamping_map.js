@@ -8,7 +8,7 @@ try {
 }
 
 const { createClient } = require('@supabase/supabase-js');
-const WebSocket = require('ws'); // 👈 新增：引入 ws 套件
+const WebSocket = require('ws');
 
 // 2. 初始化 Supabase 環境變數
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
@@ -22,7 +22,6 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   process.exit(1);
 }
 
-// 👈 關鍵修復：傳入 realtime: { transport: WebSocket } 繞過 Node 20 限制
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: false },
   realtime: { transport: WebSocket }
@@ -46,10 +45,10 @@ function normalizeName(name) {
 async function buildIcampingMap() {
   console.log('🚀 開始從 愛露營 (icamping.app) 預建全台營地對照清單...');
 
-  // 1. 抓取 Supabase 資料庫中既有的所有營地資訊
+  // 1. 抓取 Supabase 資料庫中既有的所有營地資訊（修復：僅 select 'id, name'，移除不存在的 region）
   const { data: dbCampsites, error: dbError } = await supabase
     .from('campsites')
-    .select('id, name, region');
+    .select('id, name');
 
   if (dbError || !dbCampsites) {
     console.error('❌ 抓取 Supabase 營地失敗:', dbError?.message);
@@ -119,7 +118,7 @@ async function buildIcampingMap() {
 
     if (matchedStoreId) {
       matchCount++;
-      console.log(`🎯 成功比對: [${dbCamp.name}] (${dbCamp.region || '未分區'}) ➡️ icamping_id: [${matchedStoreId}]`);
+      console.log(`🎯 成功比對: [${dbCamp.name}] ➡️ icamping_id: [${matchedStoreId}]`);
 
       const { error: updateErr } = await supabase
         .from('campsites')
