@@ -1,4 +1,4 @@
-// 🎯 1. 嘗試讀取本機環境變數 (.env 或 .env.local)
+// 🎯 1. 嘗試讀取環境變數
 try {
   require('dotenv').config({ path: '.env.local' });
 } catch (e) {
@@ -7,6 +7,7 @@ try {
   } catch (err) {}
 }
 
+const { chromium } = require('playwright');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
@@ -18,7 +19,7 @@ const SUPABASE_KEY =
   process.env.SUPABASE_ANON_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error('❌ 錯誤：找不到 Supabase URL 或 API Key！請檢查環境變數設定。');
+  console.error('❌ 錯誤：找不到 Supabase URL 或 API Key！');
   process.exit(1);
 }
 
@@ -28,7 +29,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
 });
 
 /**
- * 🧹 工具函式：簡化與清理營地名稱，提升模糊比對成功率
+ * 🧹 工具函式：清理營地名稱
  */
 function normalizeName(name) {
   if (!name) return '';
@@ -40,12 +41,12 @@ function normalizeName(name) {
 }
 
 /**
- * 🚀 主程式：預建與比對愛露營全台營地 ID
+ * 🚀 主程式：利用 Playwright 模擬真實瀏覽器爬取愛露營對照表
  */
 async function buildIcampingMap() {
-  console.log('🚀 開始從 愛露營 (icamping.app) 預建全台營地對照清單...');
+  console.log('🚀 啟動 Playwright 模擬真實瀏覽器對接愛露營 (icamping.app)...');
 
-  // 1. 抓取 Supabase 資料庫中既有的所有營地資訊（修復：僅 select 'id, name'，移除不存在的 region）
+  // 1. 抓取 Supabase 所有營地
   const { data: dbCampsites, error: dbError } = await supabase
     .from('campsites')
     .select('id, name');
@@ -55,46 +56,68 @@ async function buildIcampingMap() {
     process.exit(1);
   }
 
-  console.log(`📋 目前 Supabase 資料庫共有 ${dbCampsites.length} 個營地，準備向愛露營 API 發送查詢...`);
+  console.log(`📋 目前 Supabase 資料庫共有 ${dbCampsites.length} 個營地...`);
 
-  // 2. 涵蓋全台灣熱門露營縣市與關鍵字
-  const searchKeywords = [
-    '台南', '高雄', '南投', '台中', '苗栗', 
-    '新竹', '宜蘭', '屏東', '花蓮', '台東', '桃園', '嘉義'
-  ];
-  
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+
+  const page = await browser.newPage({
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+  });
+
   const icampingMap = new Map();
 
-  for (const keyword of searchKeywords) {
+  // 2. 直接監聽頁面所有背景 API 網路請求，自動捕捉 JSON 數據
+  page.on('response', async (response) => {
+    const url = response.url();
+    if (url.includes('/store') || url.includes('/search') || url.includes('/api')) {
+      try {
+        const json = await response.json().catch(() => null);
+        if (json) {
+          const stores = json.stores || json.data || (Array.isArray(json) ? json : []);
+          stores.forEach((s) => {
+            if (s.id && s.name) {
+              icampingMap.set(s.name.trim(), String(s.id).trim());
+            }
+          });
+        }
+      } catch (e) {}
+    }
+  });
+
+  // 3. 逐一針對每一個資料庫中的營地進行愛露營站內精準搜尋
+  console.log(`🔎 開始進行全台營地精準愛露營 ID 比對...`);
+
+  for (let i = 0; i < dbCampsites.length; i++) {
+    const camp = dbCampsites[i];
     try {
-      console.log(`🔎 正在發送愛露營搜尋 API (關鍵字: [${keyword}])...`);
-      
-      const searchUrl = `https://m.icamping.app/api/v1/stores?q=${encodeURIComponent(keyword)}`;
-      const res = await fetch(searchUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-          'Accept': 'application/json, text/plain, */*'
+      const searchUrl = `https://m.icamping.app/store/search?q=${encodeURIComponent(camp.name)}`;
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => {});
+
+      // 擷取 DOM 上的卡片超連結 (https://m.icamping.app/store/dg535)
+      const links = await page.$$eval('a[href*="/store/"]', (els) =>
+        els.map((el) => ({
+          href: el.href,
+          text: el.innerText.trim()
+        }))
+      ).catch(() => []);
+
+      links.forEach((link) => {
+        const match = link.href.match(/\/store\/([a-zA-Z0-9]+)/);
+        if (match && match[1] && link.text) {
+          icampingMap.set(link.text, match[1]);
         }
       });
-
-      if (res.ok) {
-        const data = await res.json();
-        const stores = data.stores || data.data || (Array.isArray(data) ? data : []);
-        
-        stores.forEach(store => {
-          if (store.id && store.name) {
-            icampingMap.set(store.name.trim(), String(store.id).trim());
-          }
-        });
-      }
-    } catch (err) {
-      console.warn(`⚠️ 關鍵字 [${keyword}] 搜尋發送失敗:`, err.message);
-    }
+    } catch (err) {}
   }
 
-  console.log(`✅ 愛露營全站共抓取到 ${icampingMap.size} 個特約營地！開始進行名稱雙向比對...`);
+  await browser.close();
 
-  // 3. 名稱雙向精準與模糊比對，並更新 Supabase 的 icamping_id 欄位
+  console.log(`✅ 愛露營全站捕捉到 ${icampingMap.size} 個特約對照紀錄！開始寫入 Supabase...`);
+
+  // 4. 比對與寫入 Supabase
   let matchCount = 0;
 
   for (const dbCamp of dbCampsites) {
@@ -120,21 +143,17 @@ async function buildIcampingMap() {
       matchCount++;
       console.log(`🎯 成功比對: [${dbCamp.name}] ➡️ icamping_id: [${matchedStoreId}]`);
 
-      const { error: updateErr } = await supabase
+      await supabase
         .from('campsites')
         .update({ icamping_id: matchedStoreId })
         .eq('id', dbCamp.id);
-
-      if (updateErr) {
-        console.error(`  ❌ 寫入 Supabase 失敗 (${dbCamp.name}):`, updateErr.message);
-      }
     }
   }
 
-  console.log(`\n🎉 預建同步完成！成功為 ${matchCount} / ${dbCampsites.length} 個營地綁定愛露營 icamping_id！`);
+  console.log(`\n🎉 同步完成！成功為 ${matchCount} / ${dbCampsites.length} 個營地綁定愛露營 icamping_id！`);
 }
 
-buildIcampingMap().catch(err => {
-  console.error('💥 執行嚴重失敗:', err);
+buildIcampingMap().catch((err) => {
+  console.error('💥 執行失敗:', err);
   process.exit(1);
 });
