@@ -1,4 +1,3 @@
-// scripts/sync_booking_sources.js
 try {
   require('dotenv').config({ path: '.env.local' });
 } catch (e) {
@@ -8,26 +7,34 @@ try {
 }
 
 const { createClient } = require('@supabase/supabase-js');
-const { GoogleGenAI } = require('@google/genai'); // 使用官方最新 Gemini SDK
+const { GoogleGenAI } = require('@google/genai');
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error('❌ 錯誤：找不到 Supabase URL 或 SERVICE_ROLE_KEY！');
+  process.exit(1);
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 async function parseBookingInfoWithAI(campsite) {
+  const descriptionText = campsite.description || '';
+  const notesText = campsite.notes || '';
+
   const prompt = `
 你是一個露營區資訊結構化專家。請分析以下營地的介紹與備註文本，判斷真實的訂位管道與聯絡方式：
 
 【營地名稱】：${campsite.name}
 【營地簡介與公告】：
 """
-${campsite.description \vert{}\vert{} ''}${campsite.notes || ''}
+${descriptionText}
+${notesText}
 """
 
-請嚴格輸出 JSON 格式（不要包含 markdown ```json 標記）：
+請嚴格輸出 JSON 格式（不要包含 markdown \`\`\`json 標記）：
 {
   "booking_type": "icamping" | "easycamp" | "line" | "phone" | "official_site" | "unknown",
   "line_id": "LINE ID (例如 @634gbjvj，若無則為 null)",
@@ -39,7 +46,7 @@ ${campsite.description \vert{}\vert{} ''}${campsite.notes || ''}
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash', // 速度極快且免費額度充足
+      model: 'gemini-2.5-flash',
       contents: prompt,
     });
 
@@ -54,10 +61,9 @@ ${campsite.description \vert{}\vert{} ''}${campsite.notes || ''}
 async function main() {
   console.log('🧠 啟動 LLM 營地訂位管道自動分析...');
 
-  // 撈取尚未經過 AI 分析的營地
   const { data: campsites, error } = await supabase
     .from('campsites')
-    .select('id, name, description, notes')
+    .select('id, name, description, notes, phone')
     .is('booking_type', null);
 
   if (error || !campsites) {
@@ -73,7 +79,6 @@ async function main() {
     if (result) {
       console.log(`🎯 [${camp.name}] 分析成功 ➡️ 管道: ${result.booking_type}, LINE: ${result.line_id}`);
 
-      // 寫回 Supabase 資料庫
       await supabase
         .from('campsites')
         .update({
@@ -86,7 +91,6 @@ async function main() {
         .eq('id', camp.id);
     }
 
-    // 稍微停頓避開 API 流速限制
     await new Promise(r => setTimeout(r, 800));
   }
 
