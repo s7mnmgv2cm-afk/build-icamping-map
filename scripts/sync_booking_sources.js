@@ -21,7 +21,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 /**
- * 🧠 讓 Gemini 直接使用 Google 搜尋引擎尋找答案
+ * 🧠 讓 Gemini 直接使用 Google 搜尋引擎尋找答案（加入多模型備援機制）
  */
 async function parseBookingInfoWithAI(campsite) {
   const prompt = `
@@ -45,23 +45,42 @@ async function parseBookingInfoWithAI(campsite) {
 }
 `;
 
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-      config: {
-        // 🌟 核心關鍵：直接開啟 Gemini 的 Google 搜尋工具！
-        tools: [{ googleSearch: {} }], 
-        temperature: 0.1, // 降低隨機性，提高資訊準確度
-      }
-    });
+  // 📋 備援模型清單 (依照希望的優先順序排列)
+  const candidateModels = [
+    'gemini-3.5-flash-lite', 
+    'gemini-3.1-flash-lite', 
+    'gemini-2.5-flash-lite', 
+    'gemini-3.5-flash'
+  ];
 
-    const cleanJsonText = response.text.replace(/```json|```/g, '').trim();
-    return JSON.parse(cleanJsonText);
-  } catch (err) {
-    console.error(`❌ AI 解析 [${campsite.name}] 失敗:`, err.message);
-    return null;
+  for (const modelName of candidateModels) {
+    try {
+      // 嘗試使用當前模型發送請求
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: {
+          // 🌟 核心關鍵：直接開啟 Gemini 的 Google 搜尋工具！
+          tools: [{ googleSearch: {} }], 
+          temperature: 0.1, 
+        }
+      });
+
+      const cleanJsonText = response.text.replace(/```json|```/g, '').trim();
+      
+      // 若成功解析，直接回傳結果並跳出迴圈
+      return JSON.parse(cleanJsonText); 
+      
+    } catch (err) {
+      console.log(`   [⚠️ 模型切換] ${modelName} 執行失敗 (${err.message})，準備嘗試下一個...`);
+      // 遇到錯誤時稍微暫停 1 秒，避免連續觸發 API 限制
+      await new Promise(r => setTimeout(r, 1000));
+    }
   }
+
+  // 如果陣列裡的所有模型都陣亡了，才會走到這一步
+  console.error(`❌ AI 解析 [${campsite.name}] 徹底失敗：所有備援模型皆已耗盡。`);
+  return null;
 }
 
 // 🛡️ 輕微延遲避免觸發 API 頻率限制
@@ -70,7 +89,7 @@ function randomDelay(minMs = 1500, maxMs = 3000) {
 }
 
 async function main() {
-  console.log('🤖 啟動 [原廠 Google 搜尋 + LLM] 營地訂位自動分析系統...');
+  console.log('🤖 啟動 [原廠 Google 搜尋 + 多模型備援] 營地訂位自動分析系統...');
 
   const { data: campsites, error } = await supabase
     .from('campsites')
@@ -113,7 +132,7 @@ async function main() {
     await randomDelay(1500, 3000);
   }
 
-  console.log('\n🎉 [Google 搜尋原生版] 所有營地訂位管道更新完畢！');
+  console.log('\n🎉 [終極完整版] 所有營地訂位管道更新完畢！');
 }
 
 main();
