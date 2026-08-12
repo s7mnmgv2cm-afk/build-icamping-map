@@ -16,10 +16,15 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24' # 👈 修改為 '24' (或 '22')
+          node-version: '24'
 
+      # 🎯 安裝包含 playwright 的依賴套件
       - name: Install Required Dependencies
-        run: npm install @supabase/supabase-js dotenv ws
+        run: npm install @supabase/supabase-js dotenv ws playwright
+
+      # 🎯 安裝 Playwright 瀏覽器核心
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
 
       - name: Run build_icamping_map.js
         env:
