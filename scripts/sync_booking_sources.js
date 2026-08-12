@@ -56,62 +56,98 @@ async function fetchDeepPageContent(url) {
 }
 
 /**
- * 🕵️ 步驟一：抓取 DuckDuckGo 搜尋結果與第一個非社群網址的深度內容
+ * 🕵️ 步驟一：具備防禦機制與備援搜尋的資料抓取
  */
 async function fetchSearchData(campName) {
   const resultData = { snippets: '', deepContent: '', deepUrl: '' };
   
   try {
     const query = encodeURIComponent(`"${campName}" 露營 預約 訂位 LINE`);
-    const res = await fetch(`https://html.duckduckgo.com/html/?q=${query}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    let html = '';
+    let snippets = [];
+    const searchLinks = [];
+
+    // 🛡️ 策略 1: 先嘗試抓取 DuckDuckGo
+    const ddgRes = await fetch(`https://html.duckduckgo.com/html/?q=${query}`, {
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept-Language': 'zh-TW,zh;q=0.9'
+      },
       signal: AbortSignal.timeout(5000)
     });
 
-    if (!res.ok) return resultData;
-    const html = await res.text();
-
-    const snippets = [];
-    const searchLinks = [];
-    
-    // 萃取 Snippet 與對應的 href
-    const regex = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gi;
-    let match;
-    while ((match = regex.exec(html)) !== null) {
-      const rawUrl = match[1];
-      const cleanSnippet = match[2].replace(/<[^>]+>/g, '').trim();
-      
-      // 解碼 DuckDuckGo 的跳轉 URL
-      let actualUrl = rawUrl;
-      if (rawUrl.includes('uddg=')) {
-        try { actualUrl = decodeURIComponent(rawUrl.split('uddg=')[1].split('&')[0]); } catch (e) {}
+    if (ddgRes.ok) {
+      html = await ddgRes.text();
+      const regex = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gi;
+      let match;
+      while ((match = regex.exec(html)) !== null) {
+        let actualUrl = match[1];
+        if (actualUrl.includes('uddg=')) {
+          try { actualUrl = decodeURIComponent(actualUrl.split('uddg=')[1].split('&')[0]); } catch (e) {}
+        }
+        const cleanText = match[2].replace(/<[^>]+>/g, '').trim();
+        snippets.push(cleanText);
+        searchLinks.push({ url: actualUrl, snippet: cleanText });
       }
-
-      snippets.push(cleanSnippet);
-      searchLinks.push({ url: actualUrl, snippet: cleanSnippet });
+    } else {
+      console.log(`   [🛡️ 雷達] DuckDuckGo 阻擋請求 (HTTP ${ddgRes.status})，自動切換至 Bing 備援...`);
     }
-    
+
+    // 🛡️ 策略 2: 若 DDG 失敗或抓不到內容，無縫切換至 Bing 搜尋
+    if (snippets.length === 0) {
+      const bingRes = await fetch(`https://www.bing.com/search?q=${query}`, {
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept-Language': 'zh-TW,zh;q=0.9'
+        },
+        signal: AbortSignal.timeout(5000)
+      });
+
+      if (bingRes.ok) {
+        html = await bingRes.text();
+        // 解析 Bing 搜尋結果的 li.b_algo 結構
+        const bingRegex = /<li class="b_algo".*?<a href="([^"]+)".*?>(.*?)<\/a>.*?<p[^>]*>(.*?)<\/p>/gi;
+        let match;
+        while ((match = bingRegex.exec(html)) !== null) {
+          const url = match[1];
+          const cleanText = match[3].replace(/<[^>]+>/g, '').trim();
+          if (url.startsWith('http')) {
+            snippets.push(cleanText);
+            searchLinks.push({ url: url, snippet: cleanText });
+          }
+        }
+      } else {
+        console.log(`   [🛡️ 雷達] Bing 亦阻擋請求 (HTTP ${bingRes.status})`);
+      }
+    }
+
+    // 若兩個引擎都被徹底封鎖
+    if (snippets.length === 0) {
+      console.log(`   [⚠️ 警告] 無法從搜尋引擎取得任何摘要。`);
+      return resultData;
+    }
+
     resultData.snippets = snippets.join('\n').substring(0, 1000);
 
-    // 嘗試尋找前 5 名內，第一個不是社群媒體的網址進行「深度抓取」
+    // 🕸️ 深度抓取前 5 名非社群網址
     for (let i = 0; i < Math.min(5, searchLinks.length); i++) {
       const link = searchLinks[i];
       const isBlacklisted = SOCIAL_BLACKLIST.some(domain => link.url.includes(domain));
       
       if (!isBlacklisted && link.url.startsWith('http')) {
-        console.log(`   🔗 發現非社群網址，進入深度抓取: ${link.url.substring(0, 50)}...`);
+        console.log(`   🔗 深度抓取網頁內容: ${link.url.substring(0, 45)}...`);
         const deepContent = await fetchDeepPageContent(link.url);
         if (deepContent.length > 100) {
           resultData.deepContent = deepContent;
           resultData.deepUrl = link.url;
-          break; // 抓到一個成功的就夠了，退出迴圈
+          break; 
         }
       }
     }
 
     return resultData;
   } catch (e) {
-    console.log(`⚠️ [${campName}] 搜尋失敗: ${e.message}`);
+    console.log(`   [⚠️ 錯誤] 搜尋階段發生異常: ${e.message}`);
     return resultData;
   }
 }
@@ -168,7 +204,7 @@ function randomDelay(minMs = 1500, maxMs = 3000) {
 }
 
 async function main() {
-  console.log('🤖 啟動 [搜尋引擎 + 深度抓取 + LLM] 營地訂位管道自動分析系統...');
+  console.log('🤖 啟動 [雙擎備援 + 深度抓取 + LLM] 營地訂位自動分析系統...');
 
   const { data: campsites, error } = await supabase
     .from('campsites')
@@ -178,6 +214,11 @@ async function main() {
   if (error || !campsites) {
     console.error('❌ 抓取 Supabase 失敗:', error?.message);
     process.exit(1);
+  }
+
+  if (campsites.length === 0) {
+    console.log('🎉 所有營地皆已完成訂位管道分析，無需更新！');
+    return;
   }
 
   console.log(`📋 共有 ${campsites.length} 個營地待 AI 分析...`);
@@ -215,7 +256,7 @@ async function main() {
     await randomDelay(1500, 3000);
   }
 
-  console.log('\n🎉 [深度分析版] 所有營地訂位管道更新完畢！');
+  console.log('\n🎉 [雙擎備援版] 所有營地訂位管道更新完畢！');
 }
 
 main();
