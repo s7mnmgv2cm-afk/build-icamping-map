@@ -20,161 +20,19 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// ⛔ 社群與高防護網站黑名單（不去撞牆）
-const SOCIAL_BLACKLIST = [
-  'facebook.com', 'fb.com', 'instagram.com', 'youtube.com',
-  'tiktok.com', 'twitter.com', 'x.com', 'dcard.tw', 'ptt.cc'
-];
-
 /**
- * 🕸️ 深度抓取網頁內容 (去除 HTML，保留純文字)
+ * 🧠 讓 Gemini 直接使用 Google 搜尋引擎尋找答案
  */
-async function fetchDeepPageContent(url) {
-  try {
-    const res = await fetch(url, {
-      headers: { 
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' 
-      },
-      signal: AbortSignal.timeout(4000) // 4 秒超時，避免卡死
-    });
-    
-    if (!res.ok) return '';
-    const html = await res.text();
-    
-    // 粗略去除 script, style 與 HTML 標籤
-    const cleanText = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-      
-    return cleanText.substring(0, 1000); // 只取前 1000 字
-  } catch (e) {
-    return '';
-  }
-}
-
-/**
- * 🕵️ 步驟一：具備防禦機制與備援搜尋的資料抓取
- */
-async function fetchSearchData(campName) {
-  const resultData = { snippets: '', deepContent: '', deepUrl: '' };
-  
-  try {
-    const query = encodeURIComponent(`"${campName}" 露營 預約 訂位 LINE`);
-    let html = '';
-    let snippets = [];
-    const searchLinks = [];
-
-    // 🛡️ 策略 1: 先嘗試抓取 DuckDuckGo
-    const ddgRes = await fetch(`https://html.duckduckgo.com/html/?q=${query}`, {
-      headers: { 
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept-Language': 'zh-TW,zh;q=0.9'
-      },
-      signal: AbortSignal.timeout(5000)
-    });
-
-    if (ddgRes.ok) {
-      html = await ddgRes.text();
-      const regex = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gi;
-      let match;
-      while ((match = regex.exec(html)) !== null) {
-        let actualUrl = match[1];
-        if (actualUrl.includes('uddg=')) {
-          try { actualUrl = decodeURIComponent(actualUrl.split('uddg=')[1].split('&')[0]); } catch (e) {}
-        }
-        const cleanText = match[2].replace(/<[^>]+>/g, '').trim();
-        snippets.push(cleanText);
-        searchLinks.push({ url: actualUrl, snippet: cleanText });
-      }
-    } else {
-      console.log(`   [🛡️ 雷達] DuckDuckGo 阻擋請求 (HTTP ${ddgRes.status})，自動切換至 Bing 備援...`);
-    }
-
-    // 🛡️ 策略 2: 若 DDG 失敗或抓不到內容，無縫切換至 Bing 搜尋
-    if (snippets.length === 0) {
-      const bingRes = await fetch(`https://www.bing.com/search?q=${query}`, {
-        headers: { 
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept-Language': 'zh-TW,zh;q=0.9'
-        },
-        signal: AbortSignal.timeout(5000)
-      });
-
-      if (bingRes.ok) {
-        html = await bingRes.text();
-        // 解析 Bing 搜尋結果的 li.b_algo 結構
-        const bingRegex = /<li class="b_algo".*?<a href="([^"]+)".*?>(.*?)<\/a>.*?<p[^>]*>(.*?)<\/p>/gi;
-        let match;
-        while ((match = bingRegex.exec(html)) !== null) {
-          const url = match[1];
-          const cleanText = match[3].replace(/<[^>]+>/g, '').trim();
-          if (url.startsWith('http')) {
-            snippets.push(cleanText);
-            searchLinks.push({ url: url, snippet: cleanText });
-          }
-        }
-      } else {
-        console.log(`   [🛡️ 雷達] Bing 亦阻擋請求 (HTTP ${bingRes.status})`);
-      }
-    }
-
-    // 若兩個引擎都被徹底封鎖
-    if (snippets.length === 0) {
-      console.log(`   [⚠️ 警告] 無法從搜尋引擎取得任何摘要。`);
-      return resultData;
-    }
-
-    resultData.snippets = snippets.join('\n').substring(0, 1000);
-
-    // 🕸️ 深度抓取前 5 名非社群網址
-    for (let i = 0; i < Math.min(5, searchLinks.length); i++) {
-      const link = searchLinks[i];
-      const isBlacklisted = SOCIAL_BLACKLIST.some(domain => link.url.includes(domain));
-      
-      if (!isBlacklisted && link.url.startsWith('http')) {
-        console.log(`   🔗 深度抓取網頁內容: ${link.url.substring(0, 45)}...`);
-        const deepContent = await fetchDeepPageContent(link.url);
-        if (deepContent.length > 100) {
-          resultData.deepContent = deepContent;
-          resultData.deepUrl = link.url;
-          break; 
-        }
-      }
-    }
-
-    return resultData;
-  } catch (e) {
-    console.log(`   [⚠️ 錯誤] 搜尋階段發生異常: ${e.message}`);
-    return resultData;
-  }
-}
-
-/**
- * 🧠 步驟二：Gemini 分析
- */
-async function parseBookingInfoWithAI(campsite, searchData) {
+async function parseBookingInfoWithAI(campsite) {
   const prompt = `
-你是一個台灣露營區資訊結構化專家。請分析以下營地的【網路最新搜尋摘要】與【深度網頁內容】，判斷真實的訂位管道與聯絡方式。
+你是一個台灣露營區資訊結構化專家。請使用你的 Google 搜尋能力，查詢【${campsite.name} 露營區】最新的預約與訂位方式。
+請特別留意搜尋結果或官方 Facebook 中是否有提到「官方 LINE」、「LINE ID 為 @xxx」、或是使用「愛露營」、「露營樂」等平台。
 
-【營地名稱】：${campsite.name}
-【原資料庫電話】：${campsite.phone || '無'}
-
-【搜尋結果摘要】：
-"""
-${searchData.snippets}
-"""
-
-【深度網頁內容 (來源: ${searchData.deepUrl || '無'})】：
-"""
-${searchData.deepContent}
-"""
+【原資料庫電話參考】：${campsite.phone || '無'}
 
 分析邏輯：
-1. 優先從「深度網頁內容」與「摘要」中尋找「官方 LINE」、「LINE ID 為 @xxx」，並設定 booking_type 為 line 及提取 line_id。
-2. 若網址或內容顯示為愛露營 (icamping) 或 露營樂 (easycamp)，請設定對應的 booking_type。
+1. 優先判斷是否有「官方 LINE」，並提取 line_id。若有，booking_type 設為 line。
+2. 若使用愛露營 (icamping) 或 露營樂 (easycamp)，請設定對應的 booking_type。
 3. 若都沒有，但有電話，請設為 phone。
 4. 若資訊太少無法判斷，設為 unknown。
 
@@ -191,20 +49,28 @@ ${searchData.deepContent}
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: prompt,
+      config: {
+        // 🌟 核心關鍵：直接開啟 Gemini 的 Google 搜尋工具！
+        tools: [{ googleSearch: {} }], 
+        temperature: 0.1, // 降低隨機性，提高資訊準確度
+      }
     });
 
-    return JSON.parse(response.text.replace(/```json|```/g, '').trim());
+    const cleanJsonText = response.text.replace(/```json|```/g, '').trim();
+    return JSON.parse(cleanJsonText);
   } catch (err) {
+    console.error(`❌ AI 解析 [${campsite.name}] 失敗:`, err.message);
     return null;
   }
 }
 
+// 🛡️ 輕微延遲避免觸發 API 頻率限制
 function randomDelay(minMs = 1500, maxMs = 3000) {
   return new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs));
 }
 
 async function main() {
-  console.log('🤖 啟動 [雙擎備援 + 深度抓取 + LLM] 營地訂位自動分析系統...');
+  console.log('🤖 啟動 [原廠 Google 搜尋 + LLM] 營地訂位自動分析系統...');
 
   const { data: campsites, error } = await supabase
     .from('campsites')
@@ -226,22 +92,13 @@ async function main() {
   for (let i = 0; i < campsites.length; i++) {
     const camp = campsites[i];
     
-    // A. 廣度搜尋與深度抓取
-    const searchData = await fetchSearchData(camp.name);
-    
-    if (!searchData.snippets) {
-      console.log(`⚪ [${i + 1}/${campsites.length}] [${camp.name}] 缺乏足夠搜尋結果，略過。`);
-      await randomDelay();
-      continue;
-    }
-
-    // B. AI 分析
-    const result = await parseBookingInfoWithAI(camp, searchData);
+    // 將繁重的工作全部交給帶有搜尋能力的 Gemini
+    const result = await parseBookingInfoWithAI(camp);
 
     if (result) {
       console.log(`🎯 [${i + 1}/${campsites.length}] [${camp.name}] ➡️ 管道: ${result.booking_type}, LINE: ${result.line_id || '無'}`);
 
-      // C. 更新資料庫
+      // 更新資料庫
       await supabase
         .from('campsites')
         .update({
@@ -256,7 +113,7 @@ async function main() {
     await randomDelay(1500, 3000);
   }
 
-  console.log('\n🎉 [雙擎備援版] 所有營地訂位管道更新完畢！');
+  console.log('\n🎉 [Google 搜尋原生版] 所有營地訂位管道更新完畢！');
 }
 
 main();
