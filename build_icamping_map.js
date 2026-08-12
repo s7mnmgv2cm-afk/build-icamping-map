@@ -8,8 +8,9 @@ try {
 }
 
 const { createClient } = require('@supabase/supabase-js');
+const WebSocket = require('ws'); // 👈 新增：引入 ws 套件
 
-// 2. 初始化 Supabase 環境變數 (優先讀取權限較高的 SERVICE_ROLE_KEY)
+// 2. 初始化 Supabase 環境變數
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const SUPABASE_KEY = 
   process.env.SUPABASE_SERVICE_ROLE_KEY || 
@@ -21,7 +22,11 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// 👈 關鍵修復：傳入 realtime: { transport: WebSocket } 繞過 Node 20 限制
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: false },
+  realtime: { transport: WebSocket }
+});
 
 /**
  * 🧹 工具函式：簡化與清理營地名稱，提升模糊比對成功率
@@ -59,7 +64,7 @@ async function buildIcampingMap() {
     '新竹', '宜蘭', '屏東', '花蓮', '台東', '桃園', '嘉義'
   ];
   
-  const icampingMap = new Map(); // 用於儲存 { 愛露營名稱 -> store_id }
+  const icampingMap = new Map();
 
   for (const keyword of searchKeywords) {
     try {
@@ -100,7 +105,6 @@ async function buildIcampingMap() {
     for (const [icampingName, storeId] of icampingMap.entries()) {
       const cleanIcampingName = normalizeName(icampingName);
 
-      // 完全一致、包含關係、或簡化名稱比對成功
       if (
         dbCamp.name === icampingName ||
         icampingName.includes(dbCamp.name) ||
@@ -117,7 +121,6 @@ async function buildIcampingMap() {
       matchCount++;
       console.log(`🎯 成功比對: [${dbCamp.name}] (${dbCamp.region || '未分區'}) ➡️ icamping_id: [${matchedStoreId}]`);
 
-      // 寫回 Supabase 資料庫
       const { error: updateErr } = await supabase
         .from('campsites')
         .update({ icamping_id: matchedStoreId })
